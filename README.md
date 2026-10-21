@@ -7,6 +7,44 @@ The default source is GitLab's public company handbook (people policies, time of
 benefits). It is a good stand-in for an internal Confluence space. To use any other
 site, edit `config.py`.
 
+## Architecture
+
+```mermaid
+flowchart LR
+    WEB["Website<br/>GitLab handbook"]
+    subgraph MAC["Your computer"]
+        ING["ingest.py<br/>builds the library"]
+        ASK["ask.py / app.py<br/>answers questions"]
+        EMB["Embedding model<br/>all-MiniLM-L6-v2, runs locally"]
+        DB[("Chroma vector DB<br/>rag_store/<br/>chunks, vectors, links")]
+    end
+    LLM["Claude API<br/>writes the answer"]
+
+    WEB -->|HTML pages| ING
+    ING -->|chunks| EMB
+    EMB -->|vectors| DB
+    ASK -->|question| EMB
+    EMB -->|query vector| DB
+    DB -->|top 5 chunks + links| ASK
+    ASK -->|chunks + question| LLM
+    LLM -->|cited summary| ASK
+```
+
+| Component | Role | Why it's there |
+|---|---|---|
+| `ingest.py` | Crawls, cleans and chunks pages, then stores them | Builds the searchable library ahead of time |
+| Embedding model | Turns text into 384 numbers that capture meaning | Matches by meaning: "vacation" finds "paid time off". Free, and nothing leaves your computer |
+| Chroma vector DB | Stores each chunk with its vector and link | Finds the closest chunks in milliseconds; keeps the source link next to the text |
+| `ask.py` / `app.py` | Embeds the question, retrieves, prompts Claude, attaches links | The question-answering loop (terminal and chat page) |
+| Claude API | Writes a short summary citing [1], [2]… | The only step that leaves your computer, and it only receives the 5 retrieved chunks |
+
+The key design choice: **search finds the facts, and the LLM only writes the summary.**
+Links come from the stored metadata, never from the model, so they can't be invented.
+The same embedding model is used for chunks and questions, so their vectors are
+comparable.
+
+### Data flow
+
 ```mermaid
 flowchart LR
     subgraph ingest["ingest.py: build the library (run once)"]
@@ -29,24 +67,50 @@ flowchart LR
 
 ## 1. Run it (about 10 minutes)
 
-**Requirements:** Python 3.10 or newer. An Anthropic API key is optional; without
+**Requirements:** Python 3.9 or newer. An Anthropic API key is optional; without
 one you still get retrieval and links, just no written summary.
 
-Windows (PowerShell):
-```powershell
-cd site-rag
-python -m venv .venv
-.venv\Scripts\Activate.ps1
+macOS / Linux:
+```bash
+git clone https://github.com/chitanya-chitturi/website-rag-assistant.git
+cd website-rag-assistant
+python3 -m venv .venv
+source .venv/bin/activate          # prompt now starts with (.venv)
 pip install -r requirements.txt
-$env:ANTHROPIC_API_KEY = "sk-ant-..."        # optional, from console.anthropic.com
 
-python ingest.py --reset                       # Stage 1: build the index
+python ingest.py --reset           # Stage 1: build the index (add --max-pages 20 for a quick test)
 python ask.py --show-chunks "How much paid time off do employees get?"
-streamlit run app.py                           # chat UI at http://localhost:8501
+streamlit run app.py               # chat UI at http://localhost:8501
 ```
 
-macOS / Linux: the same steps, except you activate with `source .venv/bin/activate`
-and set the key with `export ANTHROPIC_API_KEY=sk-ant-...`.
+Windows (PowerShell): use `python` instead of `python3`, and activate with
+`.venv\Scripts\Activate.ps1`.
+
+In every new terminal window, `cd` into the folder and run the `activate` line again.
+
+### Adding your Anthropic API key (for written answers)
+
+Create a key at [console.anthropic.com](https://console.anthropic.com) under **API Keys**.
+**Never put the key in `config.py` or any file in this repo**, because it would be
+published to GitHub.
+
+```bash
+# This terminal window only:
+export ANTHROPIC_API_KEY=sk-ant-...
+
+# Or permanently on macOS (saved in your home folder, outside the repo):
+echo 'export ANTHROPIC_API_KEY=sk-ant-...' >> ~/.zshrc && source ~/.zshrc
+```
+On Windows PowerShell: `$env:ANTHROPIC_API_KEY = "sk-ant-..."`
+
+### Querying
+
+| Command | What you get |
+|---|---|
+| `python ask.py "question"` | Answer + source links |
+| `python ask.py --show-chunks "question"` | The above, plus the 5 retrieved chunks and their distances |
+| `python ask.py --no-llm "question"` | Chunks and links only, with no Claude call |
+| `streamlit run app.py` | Chat page; the sidebar shows the retrieved chunks |
 
 The first `ingest.py` run downloads the embedding model (about 80 MB, one time only).
 Crawling 150 pages then takes a few minutes, because the crawler waits one second
